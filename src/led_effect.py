@@ -76,6 +76,7 @@ class ledFrameHandler:
         self.heaterCurrent   = {}
         self.heaterTarget    = {}
         self.heaterLast      = {}
+        self.heaterPeak      = {}
         self.heaterTimer     = None
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self.ledChains=[]
@@ -83,7 +84,12 @@ class ledFrameHandler:
                                     self.cmd_STOP_LED_EFFECTS,
                                     desc=self.cmd_STOP_LED_EFFECTS_help)
 
+        self.gcode.register_command('RESET_LED_EFFECTS',
+                                    self.cmd_RESET_LED_EFFECTS,
+                                    desc=self.cmd_RESET_LED_EFFECTS_help)
+
     cmd_STOP_LED_EFFECTS_help = 'Stops all led_effects'
+    cmd_RESET_LED_EFFECTS_help = 'Resets learned heater temps for led_effects'
 
     def _handle_ready(self):
         self.reactor = self.printer.get_reactor()
@@ -111,6 +117,7 @@ class ledFrameHandler:
             pheater = self.printer.lookup_object('heaters')
             self.heaters[effect.heater] = pheater.lookup_heater(effect.heater)
             self.heaterLast[effect.heater] = 100
+            self.heaterPeak[effect.heater] = 0
             self.heaterCurrent[effect.heater] = 0
             self.heaterTarget[effect.heater]  = 0
 
@@ -134,9 +141,13 @@ class ledFrameHandler:
             current, target = self.heaters[heater].get_temp(eventtime)
             self.heaterCurrent[heater] = current
             self.heaterTarget[heater]  = target
+            if self.heaterPeak[heater] == 0:
+                self.heaterPeak[heater] = current
             if target > 0:
                 self.heaterLast[heater] = target
-        return eventtime + 1
+                if target > self.heaterPeak[heater]:
+                    self.heaterPeak[heater] = target
+        return eventtime + 0.25
 
     def _pollStepper(self, eventtime):
 
@@ -194,6 +205,10 @@ class ledFrameHandler:
     def cmd_STOP_LED_EFFECTS(self, gcmd):
         for effect in self.effects:
             effect.set_enabled(False)
+
+    def cmd_RESET_LED_EFFECTS(self, gcmd):
+        for heater in self.heaters.iterkeys():
+            self.heaterPeak[heater] = 0
 
 def load_config(config):
     return ledFrameHandler(config)
@@ -766,30 +781,29 @@ class ledEffect:
             if self.frameHandler.heaterTarget[self.handler.heater] > 0.0 and \
                self.frameHandler.heaterCurrent[self.handler.heater] > 0.0:
 
-                if self.frameHandler.heaterCurrent[self.handler.heater] <= \
-                   self.frameHandler.heaterTarget[self.handler.heater]-5:
-
-                    s = int((self.frameHandler.
-                                heaterCurrent[self.handler.heater] / 
-                                self.frameHandler.
-                                heaterTarget[self.handler.heater]) * 200)
-                    s = min(len(self.thisFrame)-1,s)
-                    return self.thisFrame[s]
-                elif self.effectCutoff > 0:
+                if self.frameHandler.heaterCurrent[self.handler.heater] >= \
+                        self.frameHandler.heaterTarget[self.handler.heater]-5 and self.effectCutoff > 0:
+                    # FIXME: A better solution would be to flag at exact temperature
+                    # and hold until temp drifts more than 5c
                     return None
-                else:
-                    return self.thisFrame[-1]
+
+                s = int(min(1, max(1, self.frameHandler.
+                            heaterCurrent[self.handler.heater]-self.effectRate) /
+                            max(1, self.frameHandler.
+                            heaterPeak[self.handler.heater]-self.effectRate)) * 200)
+                s = min(len(self.thisFrame)-1,s)
+                return self.thisFrame[s]
             elif self.effectRate > 0 and \
                  self.frameHandler.heaterCurrent[self.handler.heater] > 0.0:
                 if self.frameHandler.heaterCurrent[self.handler.heater] >= \
                     self.effectRate and \
                     self.frameHandler.heaterLast[self.handler.heater] > 0:
 
-                    s = int(((self.frameHandler.
+                    s = int(min(1, max(0, self.frameHandler.
                                 heaterCurrent[self.handler.heater] - 
                                 self.effectRate) / 
-                                self.frameHandler.
-                                heaterLast[self.handler.heater]) * 200)
+                                max(1, self.frameHandler.
+                                heaterPeak[self.handler.heater]-self.effectRate)) * 200)
                     s = min(len(self.thisFrame)-1,s)
                     return self.thisFrame[s]
 
